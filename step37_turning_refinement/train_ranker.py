@@ -8,11 +8,9 @@ from pathlib import Path
 sys.path.append(os.getcwd())
 from utils.notifier import send_discord_notification
 
-URL = "https://discord.com/api/webhooks/1504302314620715042/QqgM9VI4Z-o9IqV10khxjToRfcSR-WORkHkO7srYBo4C5ZjYlRFGVGChDA0WBUjyxgR7"
-
 def train_regime_model(regime_name, train_data_path, model_path, time_limit):
     try:
-        send_discord_notification(URL, f"🚀 [Step 37] GMM Regime Regression Ranker ({regime_name}) Training Started...")
+        send_discord_notification(None, f"🚀 [Step 37] GMM Regime Regression Ranker ({regime_name}) Training Started...")
         
         print(f"Loading {regime_name} data from {train_data_path}...")
         df = pd.read_csv(train_data_path)
@@ -80,12 +78,12 @@ def train_regime_model(regime_name, train_data_path, model_path, time_limit):
             f"Best Validation MAE: **{-best_score:.6f} cm**\n\n"
             f"**Leaderboard Top 10:**\n```\n{leaderboard.head(10)[['model', 'score_val', 'pred_time_val', 'fit_time']].to_string()}\n```"
         )
-        send_discord_notification(URL, success_msg)
+        send_discord_notification(None, success_msg)
         print(success_msg)
         
     except BaseException as e:
         error_msg = f"❌ [Step 37] Training ERROR ({regime_name}):\n{str(e)}\n\n{traceback.format_exc()}"
-        send_discord_notification(URL, error_msg)
+        send_discord_notification(None, error_msg)
         print(error_msg)
         raise e
 

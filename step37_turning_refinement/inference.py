@@ -24,8 +24,6 @@ from step37_turning_refinement.physics import (
 from step37_turning_refinement.prepare_data import extract_context_features, CLUSTER_FEATURES
 from utils.notifier import send_discord_notification
 
-URL = "https://discord.com/api/webhooks/1504302314620715042/QqgM9VI4Z-o9IqV10khxjToRfcSR-WORkHkO7srYBo4C5ZjYlRFGVGChDA0WBUjyxgR7"
-
 # Precompute multiplier matrices for vectorized candidate generation
 def compute_multiplier_matrix(cands_list, horizon=2):
     v_scale = horizon
@@ -235,7 +233,7 @@ def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
 def run_step37_inference(batch_size=250, model_type="l3"):
     try:
         msg = f"🚀 [Step 37] GMM 4-Regime Regression Inference Started (batch_size={batch_size}, model_type={model_type})..."
-        send_discord_notification(URL, msg)
+        send_discord_notification(None, msg)
         print(msg)
         
         data_dir = Path("data/open")
@@ -502,12 +500,12 @@ def run_step37_inference(batch_size=250, model_type="l3"):
             f"- **Mean**: **{mean_disp_cm:.4f} cm**\n"
             f"- **Max**: **{max_disp_cm:.4f} cm**"
         )
-        send_discord_notification(URL, success_msg)
+        send_discord_notification(None, success_msg)
         print(success_msg)
         
     except BaseException as e:
         error_msg = f"❌ [Step 37] Inference ERROR:\n{str(e)}\n\n{traceback.format_exc()}"
-        send_discord_notification(URL, error_msg)
+        send_discord_notification(None, error_msg)
         print(error_msg)
         raise e
 

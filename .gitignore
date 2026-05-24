@@ -25,3 +25,28 @@ env/
 
 # Outputs
 outputs/*
+
+.env
+wandb/
+
+# AutoGluon & Model Checkpoints
+**/models/
+AutogluonModels/
+AutogluonModels*
+*.pkl
+**/*.pkl
+
+# Large Datasets & CSV Files
+*.csv
+**/*.csv
+
+# Model Weights
+*.pth
+**/*.pth
+*.pt
+**/*.pt
+
+# Temporary logs & scratch directory
+scratch/
+*.log
+**/*.log

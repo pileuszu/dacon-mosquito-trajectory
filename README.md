@@ -4,7 +4,6 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![LightGBM](https://img.shields.io/badge/LightGBM-green?style=for-the-badge)](https://github.com/microsoft/LightGBM)
 [![AutoGluon](https://img.shields.io/badge/AutoGluon-orange?style=for-the-badge)](https://autogluon.mxnet.io/)
-[![SOTA Score](https://img.shields.io/badge/SOTA_Score-0.6868-gold?style=for-the-badge)](https://dacon.io/)
 
 This repository contains the complete, reproduction-ready source code and experimental pipeline for the **DACON Mosquito Trajectory Prediction** competition. The solution models continuous-time aerodynamics under physical constraints and sensory measurement noise to predict future 3D coordinates.
 

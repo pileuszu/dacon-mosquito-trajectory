@@ -24,7 +24,7 @@ env/
 .idea/
 
 # Outputs
-outputs/*
+outputs/
 
 .env
 wandb/
@@ -45,8 +45,15 @@ AutogluonModels*
 **/*.pth
 *.pt
 **/*.pt
+*.npy
+**/*.npy
 
 # Temporary logs & scratch directory
 scratch/
 *.log
 **/*.log
+
+# Agent & Model Reproductions
+.agents/
+models_trained/
+outputs_reproduced/

@@ -1,0 +1,109 @@
+# 🦟 3D Mosquito Trajectory Prediction AI Solution
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![LightGBM](https://img.shields.io/badge/LightGBM-green?style=for-the-badge)](https://github.com/microsoft/LightGBM)
+[![AutoGluon](https://img.shields.io/badge/AutoGluon-orange?style=for-the-badge)](https://autogluon.mxnet.io/)
+[![SOTA Score](https://img.shields.io/badge/SOTA_Score-0.6868-gold?style=for-the-badge)](https://dacon.io/)
+
+This repository contains the complete, reproduction-ready source code and experimental pipeline for the **DACON Mosquito Trajectory Prediction** competition. The solution models continuous-time aerodynamics under physical constraints and sensory measurement noise to predict future 3D coordinates.
+
+---
+
+## 🏆 Key Performance Metrics
+
+> [!TIP]
+> ### 📊 Validation & Leaderboard Results
+> * **Public Leaderboard Score (Hit@1cm)**: **`0.6868`** 🏆 *(SOTA)*
+> * **Validation Performance (OOF Hit@1cm)**: **`67.87%`**
+> * **Average Displacement Error**: **`4.79 cm`**
+> * **Maximum Displacement**: **`11.11 cm`** *(Strictly within the 12.0cm physical testing chamber boundary)*
+
+---
+
+## 💡 Core Architecture Highlights
+
+Our solution shifts the trajectory forecasting paradigm from unconstrained black-box coordinate extrapolation to a **hybrid discrete-continuous geometric framework**:
+
+1. **Frenet-Serret Neural ODE Simulator**: Evaluates continuous-time trajectory integration via a learned acceleration field within the moving Frenet Frame (Tangent, Normal, Binormal), integrated via 4th-order Runge-Kutta (RK4) and trained via a custom **Focal Soft-Hit Loss**.
+2. **Clifford Geometric Algebra $Cl(3,0)$ CFM**: Leverages a selective Mamba State Space Model (SSM) wrapped in Clifford Linear Layers to natively process physical multivector transformations, guaranteeing strict **Rotational Covariance** (preserving symmetry under coordinate rotations).
+3. **Tabular Ranker (Feature Decoupling)**: A high-precision LightGBM Ranker evaluating an expanded 43-candidate candidate pool, completely separating spatial priors from the GBDT tree feature space to prevent decision boundary distortion.
+4. **Powell Weight Ensembling**: A Nelder-Mead and Powell direct search optimizer finding optimal continuous blending weights across 4 GMM-classified flight regimes (Cruising, Gliding, Steering, Saccades).
+5. **Outlier Damping Classifier**: A 5-fold CV LightGBM classifier predicting tracking failures on ensemble dispersion metrics, regularizing high-risk trajectories towards the last observed point ($p_{\text{last}}$) and guiding them with Clifford-Mamba CFM predictions.
+
+---
+
+## 📂 Repository Structure
+
+```
+dacon-mosquito-trajectory/
+├── .env.example                # Environment variables configuration template
+├── README.md                   # Beautiful English landing page
+├── README_KR.md                # Beautiful Korean landing page
+├── requirements.txt            # Python dependencies
+├── src/                        # Clean, reproducible production source code
+│   ├── models/
+│   │   ├── cfm_model.py        # Clifford-Mamba CFM architecture & Soft Hit loss
+│   │   ├── neural_ode.py       # Physics-Guided Neural ODE (RK4 integration)
+│   │   └── outlier_classifier.py # LightGBM Outlier Damping Classifier
+│   ├── data_preprocessing.py   # Raw CSV parsing & 180+ biomechanical feature extraction
+│   ├── candidate_generator.py  # Physics/ODE/CFM candidate grid generator
+│   ├── train.py                # 5-Fold training for ODE, CFM, and Ranker models
+│   ├── powell_optimization.py  # Nelder-Mead/Powell blending weight optimization
+│   ├── inference.py            # Ensembling, snap-routing, and outlier damping
+│   └── reproduce.py            # Master orchestrator script
+├── docs/                       # Technical reports & documentation
+│   ├── wrapup_report.md        # English Technical Wrap-Up Report (No external links)
+│   ├── wrapup_report_kr.md     # Korean Technical Wrap-Up Report (No external links)
+│   ├── analysis/               # Exploratory Data Analysis & clustering reports
+│   ├── biomechanics/           # Bio-aerodynamics & physical AI literature reviews
+│   └── experiments_history/    # Milestone logs and step reports
+├── eda/                        # Exploratory Data Analysis (EDA) scripts
+│   ├── reports/                # Markdown EDA analysis reports
+│   ├── images/                 # Visualization output directory
+│   └── *.py                    # EDA computation and rendering scripts
+├── experiments/                # Chronological milestone archives (Step 0 to Step 66)
+├── models_trained/             # Checkpoints & arrays from reproduction run (Git ignored)
+└── outputs_reproduced/         # Outputs generated by the reproduction pipeline (Git ignored)
+```
+
+---
+
+## 📄 Technical Wrap-Up Reports
+
+For detailed system designs, modeling hypotheses, mathematical formulations, and validation stats:
+* **[English Technical Wrap-Up Report](docs/wrapup_report.md)**
+* **[Korean Technical Wrap-Up Report](docs/wrapup_report_kr.md)**
+
+---
+
+## 🛠️ How to Reproduce
+
+### 1. Prerequisites
+Install all python dependencies using pip:
+```bash
+pip install -r requirements.txt
+```
+Copy the environment variables template and configure your credentials (e.g. WandB API Key, optional Discord Webhook URL):
+```bash
+cp .env.example .env
+```
+> [!IMPORTANT]
+> The raw competition datasets (`train/`, `test/`, `train_labels.csv`, `sample_submission.csv`) must be placed inside the `data/open/` directory.
+
+### 2. End-to-End Run (Full Training & Inference)
+To train all primary models (Neural ODE, Clifford-Mamba CFM, LightGBM Ranker, Outlier Classifier) from scratch, optimize the Powell blending weights, and generate the final `submission.csv` file:
+```bash
+python src/reproduce.py
+```
+
+### 3. Fast Dry-Run Verification
+To run a fast, end-to-end dry-run verification (highly reduced epochs, LightGBM surrogate ranker, and fast Powell iterations) which executes in less than 3 minutes:
+```bash
+python src/reproduce.py --fast
+```
+
+#### Fast Mode Validation Statistics:
+* **Average Displacement**: **`4.7973 cm`**
+* **Maximum Displacement**: **`11.1151 cm`** *(no out-of-bounds predicted points)*
+* **Format Check**: 10,000 predictions, 0 NaN/Inf values, matching format exactly.

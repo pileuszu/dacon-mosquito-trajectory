@@ -17,13 +17,14 @@ import torch
 torch.set_num_threads(4)
 
 sys.path.append(os.getcwd())
-from step36_three_regime.physics import (
-    CANDIDATES_SLOW, CANDIDATES_FAST, get_damping_factors, extract_multi_scale_derivatives, PINV_W5_QUAD, PINV_W3_QUAD, EPS
+from step39_six_regime.physics import (
+    CANDIDATES_SLOW, CANDIDATES_FAST, CandidateSpec, get_damping_factors, extract_multi_scale_derivatives,
+    PINV_W5_QUAD, PINV_W3_QUAD, EPS
 )
-from step36_three_regime.prepare_data import extract_context_features, CLUSTER_FEATURES
+from step39_six_regime.prepare_data import extract_context_features, CLUSTER_FEATURES, REGIME_MAPPING
 from utils.notifier import send_discord_notification
 
-URL = "https://discord.com/api/webhooks/1504302314620715042/QqgM9VI4Z-o9IqV10khxjToRfcSR-WORkHkO7srYBo4C5ZjYlRFGVGChDA0WBUjyxgR7"
+URL = None
 
 # Precompute multiplier matrices for vectorized candidate generation
 def compute_multiplier_matrix(cands_list, horizon=2):
@@ -53,8 +54,16 @@ def compute_multiplier_matrix(cands_list, horizon=2):
         
     return np.array(M, dtype=np.float32)
 
+fallback_specs = [
+    CandidateSpec(name="straight_fallback_d0.2", d1=1.0, par=0.0, perp=0.0, damping=0.2),
+    CandidateSpec(name="straight_fallback_d0.5", d1=1.0, par=0.0, perp=0.0, damping=0.5),
+    CandidateSpec(name="straight_fallback_d0.8", d1=1.0, par=0.0, perp=0.0, damping=0.8),
+]
+CANDS_FAST_TURNING = CANDIDATES_FAST + fallback_specs
+
 M_SLOW = compute_multiplier_matrix(CANDIDATES_SLOW)
 M_FAST = compute_multiplier_matrix(CANDIDATES_FAST)
+M_FAST_TURNING = compute_multiplier_matrix(CANDS_FAST_TURNING)
 
 CANDS_SLOW_SPECS = {
     "cand_idx": np.arange(len(CANDIDATES_SLOW) + 2, dtype=np.int32),
@@ -76,6 +85,16 @@ CANDS_FAST_SPECS = {
     "is_prior": np.array([0]*len(CANDIDATES_FAST) + [1, 1], dtype=np.int32)
 }
 
+CANDS_FAST_TURNING_SPECS = {
+    "cand_idx": np.arange(len(CANDS_FAST_TURNING) + 2, dtype=np.int32),
+    "spec_par": np.array([s.par for s in CANDS_FAST_TURNING] + [0.0, 0.0], dtype=np.float32),
+    "spec_perp": np.array([s.perp for s in CANDS_FAST_TURNING] + [0.0, 0.0], dtype=np.float32),
+    "spec_ts": np.array([s.time_scale for s in CANDS_FAST_TURNING] + [1.0, 1.0], dtype=np.float32),
+    "spec_dmp": np.array([s.damping for s in CANDS_FAST_TURNING] + [0.0, 0.0], dtype=np.float32),
+    "spec_jerk": np.array([s.jerk for s in CANDS_FAST_TURNING] + [0.0, 0.0], dtype=np.float32),
+    "is_prior": np.array([0]*len(CANDS_FAST_TURNING) + [1, 1], dtype=np.int32)
+}
+
 def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
     x_sliced = x[:end_idx+1] if end_idx != -1 else x
     p0 = x_sliced[-1]
@@ -93,64 +112,107 @@ def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
     ctx = extract_multi_scale_derivatives(x_sliced)
     p_sacc = ctx["ctx_p_saccade"]
     ctx_lat_accel = ctx["ctx_lat_accel"]
-    
-    cross_va = np.cross(d1, acc)
-    ctx_curv = np.linalg.norm(cross_va) / (speed**3 + 1e-6)
+    ctx_curv = ctx["smooth_curv_w5"]
     
     is_turning = (ctx_curv > 12.0) or (ctx_lat_accel > 0.0020)
     
-    acc_type = "w5"
-    if regime is not None:
-        if regime in ["slow_straight", "cruising"]:
-            M = M_SLOW.copy()
-            spec_arr = CANDS_SLOW_SPECS
-            S_grid = 1.0
-            acc_type = "w5"
-        elif regime in ["fast_straight", "gliding"]:
-            M = M_FAST.copy()
-            spec_arr = CANDS_FAST_SPECS
-            S_grid = float(np.clip(1.0 + 0.6 * p_sacc + 0.05 * (ctx_curv - 6.0), 1.0, 2.5))
-            acc_type = "w5"
-        elif regime in ["slow_extreme_turning", "fast_turning", "steering"]:
-            M = M_FAST.copy()
-            spec_arr = CANDS_FAST_SPECS
-            S_grid = float(np.clip(1.0 + 0.8 * p_sacc + 0.08 * (ctx_curv - 6.0), 1.0, 3.5))
-            acc_type = "w3"
-        else:
-            raise ValueError(f"Unknown regime: {regime}")
-    else:
-        if speed <= 0.0234 and not is_turning:
-            M = M_SLOW.copy()
-            spec_arr = CANDS_SLOW_SPECS
-            S_grid = 1.0
-            acc_type = "w5"
-        else:
-            M = M_FAST.copy()
-            spec_arr = CANDS_FAST_SPECS
-            if is_turning:
-                S_grid = float(np.clip(1.0 + 0.8 * p_sacc + 0.08 * (ctx_curv - 6.0), 1.0, 3.5))
-                acc_type = "w3"
-            else:
-                S_grid = float(np.clip(1.0 + 0.6 * p_sacc + 0.05 * (ctx_curv - 6.0), 1.0, 2.5))
-                acc_type = "w5"
-                
-    if acc_type == "w5" and len(x_sliced) >= 5:
-        x_w5 = x_sliced[-5:]
-        coeffs_w5 = PINV_W5_QUAD @ x_w5
-        acc_smooth = 2.0 * coeffs_w5[0]
-    elif acc_type == "w3" and len(x_sliced) >= 3:
+    # 6-Regime Vectorized Candidate Generation
+    if regime == "fast_straight_low":
+        acc_smooth = acc
+        if len(x_sliced) >= 5:
+            x_w5 = x_sliced[-5:]
+            coeffs_w5 = PINV_W5_QUAD @ x_w5
+            acc_smooth = 2.0 * coeffs_w5[0]
+            
+        M = M_FAST.copy()
+        spec_arr = CANDS_FAST_SPECS
+        S_grid = float(np.clip(1.0 + 0.4 * p_sacc, 1.0, 1.8))
+        
+    elif regime == "slow_moderate_turning":
+        acc_smooth = acc
+        if len(x_sliced) >= 5:
+            x_w5 = x_sliced[-5:]
+            coeffs_w5 = PINV_W5_QUAD @ x_w5
+            acc_smooth = 2.0 * coeffs_w5[0]
+            
+        M = M_SLOW.copy()
+        spec_arr = CANDS_SLOW_SPECS
+        S_grid = float(np.clip(1.0 + 0.1 * ctx_curv, 1.0, 1.5))
+        
+    elif regime == "fast_moderate_turning":
+        acc_smooth = acc
+        if len(x_sliced) >= 5:
+            x_w5 = x_sliced[-5:]
+            coeffs_w5 = PINV_W5_QUAD @ x_w5
+            acc_smooth = 2.0 * coeffs_w5[0]
+            
+        M = M_FAST.copy()
+        spec_arr = CANDS_FAST_SPECS
+        S_grid = float(np.clip(1.2 + 0.1 * ctx_curv, 1.2, 2.0))
+        
+    elif regime == "fast_straight_high":
+        acc_smooth = acc
+        if len(x_sliced) >= 5:
+            x_w5 = x_sliced[-5:]
+            coeffs_w5 = PINV_W5_QUAD @ x_w5
+            acc_smooth = 2.0 * coeffs_w5[0]
+            
+        M = M_FAST.copy()
+        spec_arr = CANDS_FAST_SPECS
+        S_grid = float(np.clip(1.0 + 0.6 * p_sacc, 1.0, 2.5))
+        
+    elif regime == "fast_extreme_turning":
         x_w3 = x_sliced[-3:]
         coeffs_w3 = PINV_W3_QUAD @ x_w3
         acc_smooth = 2.0 * coeffs_w3[0]
-    else:
-        acc_smooth = acc
         
+        speed_w3 = np.linalg.norm(coeffs_w3[1])
+        tangent = coeffs_w3[1] / (speed_w3 + EPS)
+        
+        M = M_FAST_TURNING.copy()
+        spec_arr = CANDS_FAST_TURNING_SPECS
+        S_grid = float(np.clip(1.8 + 0.8 * p_sacc, 1.8, 3.5))
+        
+    elif regime == "slow_extreme_turning":
+        x_w3 = x_sliced[-3:]
+        coeffs_w3 = PINV_W3_QUAD @ x_w3
+        acc_smooth = 2.0 * coeffs_w3[0]
+        
+        speed_w3 = np.linalg.norm(coeffs_w3[1])
+        tangent = coeffs_w3[1] / (speed_w3 + EPS)
+        
+        M = M_FAST.copy()
+        spec_arr = CANDS_FAST_SPECS
+        S_grid = float(np.clip(1.8 + 0.15 * ctx["smooth_curv_w3"], 1.8, 3.5))
+        
+    else:
+        # Fallback
+        if speed <= 0.0234 and not is_turning:
+            acc_smooth = acc
+            if len(x_sliced) >= 5:
+                x_w5 = x_sliced[-5:]
+                coeffs_w5 = PINV_W5_QUAD @ x_w5
+                acc_smooth = 2.0 * coeffs_w5[0]
+            M = M_SLOW.copy()
+            spec_arr = CANDS_SLOW_SPECS
+            S_grid = 1.0
+        else:
+            acc_smooth = acc
+            if len(x_sliced) >= 5:
+                x_w5 = x_sliced[-5:]
+                coeffs_w5 = PINV_W5_QUAD @ x_w5
+                acc_smooth = 2.0 * coeffs_w5[0]
+            M = M_FAST.copy()
+            spec_arr = CANDS_FAST_SPECS
+            S_grid = float(np.clip(1.0 + 0.6 * p_sacc, 1.0, 2.5))
+            
     acc_par_scalar = np.sum(acc_smooth * tangent)
     acc_par = acc_par_scalar * tangent
     acc_perp_vec = acc_smooth - acc_par
     
     D = np.vstack([d1, d2, acc_par, acc_perp_vec, jerk])
     
+    # Scale coordinates by multiplying M rows directly
     M[:, 2] *= S_grid
     M[:, 3] *= S_grid
     
@@ -159,8 +221,10 @@ def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
     s7_pos, s4_pos = priors
     all_cands = np.vstack([preds, s7_pos, s4_pos])
     
+    # Compute candidate features
     d_cands = all_cands - p0
     c_speeds = np.linalg.norm(d_cands, axis=-1) / 2.0
+    c_speed_ratio = c_speeds / (np.linalg.norm(d1) + EPS)
     
     v0_norm = np.linalg.norm(d1)
     v0_hat = d1 / (v0_norm + EPS)
@@ -182,6 +246,7 @@ def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
     c_features = {
         "grid_scale": np.full(len(all_cands), S_grid, dtype=np.float32),
         "cand_speed": c_speeds,
+        "cand_speed_ratio": c_speed_ratio,
         "cand_turn_angle": c_turn_angles,
         "cand_turn_rate": c_turn_rates,
         "cand_accel": c_accels,
@@ -190,9 +255,11 @@ def make_candidates_vectorized(x, priors, end_idx=-1, horizon=2, regime=None):
     
     return all_cands, spec_arr, speed, tangent, is_turning, S_grid, ctx_curv, c_features
 
-def run_step36_inference():
+def run_step39_inference(batch_size=250, model_type="l3", blend_priors=False):
     try:
-        send_discord_notification(None, "🚀 [Step 36] GMM 3-Regime Inference Started...")
+        msg = f"🚀 [Step 39] GMM 6-Regime Inference Started (batch_size={batch_size}, model_type={model_type}, blend_priors={blend_priors})..."
+        send_discord_notification(URL, msg)
+        print(msg)
         
         data_dir = Path("data/open")
         test_dir = data_dir / "test"
@@ -201,22 +268,20 @@ def run_step36_inference():
         print("Loading EqMotion test predictions...")
         s4_preds_df = pd.read_csv("experiments/step12/step4_preds_test.csv").set_index('id')
         
-        # Load Scaler, GMM model, and regime mapping
-        print("Loading Scaler, GMM, and mapping config...")
-        models_dir = Path("step36_three_regime/models")
+        # Load GMM-6 Config
+        print("Loading Scaler, GMM-6, and mapping config...")
+        models_dir = Path("step39_six_regime/models")
         with open(models_dir / "scaler.pkl", "rb") as f:
             scaler = pickle.load(f)
         with open(models_dir / "gmm_model.pkl", "rb") as f:
             gmm = pickle.load(f)
-        with open(models_dir / "regime_mapping.pkl", "rb") as f:
-            mapping = pickle.load(f)
             
-        # Load the 3 TabularPredictors
+        # Load 6 TabularPredictors
         predictors = {}
-        for model_reg in ["cruising", "gliding", "steering"]:
-            model_path = models_dir / f"ranker_v36_{model_reg}"
-            print(f"Loading AutoGluon Predictor for {model_reg} from {model_path}...")
-            predictors[model_reg] = TabularPredictor.load(str(model_path))
+        for regime in REGIME_MAPPING.values():
+            model_path = Path(f"step39_six_regime/models/ranker_v39_{regime}")
+            print(f"Loading AutoGluon Predictor for {regime} from {model_path}...")
+            predictors[regime] = TabularPredictor.load(str(model_path))
             
         submission_df = pd.read_csv(data_dir / "sample_submission.csv")
         test_ids = submission_df['id'].values
@@ -224,8 +289,7 @@ def run_step36_inference():
         predictions = []
         displacements = []
         
-        batch_size = 20
-        print(f"Running batched inference (batch_size={batch_size}) with Anisotropic Gaussian Blending...")
+        print(f"Running batched inference with Anisotropic Gaussian Blending...")
         
         for i in range(0, len(test_ids), batch_size):
             batch_ids = test_ids[i : i + batch_size]
@@ -240,6 +304,7 @@ def run_step36_inference():
             
             batch_grid_scale = []
             batch_cand_speed = []
+            batch_cand_speed_ratio = []
             batch_cand_turn_angle = []
             batch_cand_turn_rate = []
             batch_cand_accel = []
@@ -252,7 +317,6 @@ def run_step36_inference():
             batch_dist_s4 = []
             
             batch_info = []
-            
             fid_to_regime = {}
             
             start_idx = 0
@@ -268,13 +332,12 @@ def run_step36_inference():
                 s4_pos = s4_preds_df.loc[fid].to_numpy()
                 priors = [s7_pos, s4_pos]
                 
-                # Extract features and predict GMM regime
+                # Predict GMM-6 cluster
                 ctx = extract_context_features(xyz)
-                
                 feat_vector = np.array([[ctx[feat] for feat in CLUSTER_FEATURES]], dtype=np.float32)
                 feat_scaled = scaler.transform(feat_vector)
                 cluster_idx = gmm.predict(feat_scaled)[0]
-                regime_name = mapping[cluster_idx]
+                regime_name = REGIME_MAPPING[cluster_idx]
                 fid_to_regime[fid] = regime_name
                 
                 # Generate candidates
@@ -292,6 +355,7 @@ def run_step36_inference():
                 
                 batch_grid_scale.append(c_features["grid_scale"])
                 batch_cand_speed.append(c_features["cand_speed"])
+                batch_cand_speed_ratio.append(c_features["cand_speed_ratio"])
                 batch_cand_turn_angle.append(c_features["cand_turn_angle"])
                 batch_cand_turn_rate.append(c_features["cand_turn_rate"])
                 batch_cand_accel.append(c_features["cand_accel"])
@@ -317,6 +381,9 @@ def run_step36_inference():
                     "end": end_idx,
                     "cands": cands,
                     "p0": p0,
+                    "s7_pos": s7_pos,
+                    "s4_pos": s4_pos,
+                    "regime": regime_name,
                     "speed": speed,
                     "tangent": tangent,
                     "p_saccade": ctx["ctx_p_saccade"],
@@ -337,6 +404,7 @@ def run_step36_inference():
                 
                 "grid_scale": np.concatenate(batch_grid_scale),
                 "cand_speed": np.concatenate(batch_cand_speed),
+                "cand_speed_ratio": np.concatenate(batch_cand_speed_ratio),
                 "cand_turn_angle": np.concatenate(batch_cand_turn_angle),
                 "cand_turn_rate": np.concatenate(batch_cand_turn_rate),
                 "cand_accel": np.concatenate(batch_cand_accel),
@@ -351,35 +419,32 @@ def run_step36_inference():
                 
             pred_data = pd.DataFrame(pred_dict)
             
-            # Predict scores using the routed predictors
+            # Predict scores using routed GMM models
             batch_scores = np.zeros(len(pred_data), dtype=np.float32)
             
-            regime_masks = {
-                "cruising": np.zeros(len(pred_data), dtype=bool),
-                "gliding": np.zeros(len(pred_data), dtype=bool),
-                "steering": np.zeros(len(pred_data), dtype=bool)
-            }
+            regime_masks = {reg: np.zeros(len(pred_data), dtype=bool) for reg in REGIME_MAPPING.values()}
             
             for info in batch_info:
                 fid = info['id']
-                gmm_reg = fid_to_regime[fid]
-                if gmm_reg == "slow_straight":
-                    model_reg = "cruising"
-                elif gmm_reg == "fast_straight":
-                    model_reg = "gliding"
-                else: # slow_extreme_turning or fast_turning
-                    model_reg = "steering"
-                regime_masks[model_reg][info['start'] : info['end']] = True
+                regime = fid_to_regime[fid]
+                regime_masks[regime][info['start'] : info['end']] = True
                 
             for regime, mask in regime_masks.items():
                 if np.any(mask):
                     pred_data_reg = pred_data[mask]
                     predictor = predictors[regime]
-                    proba = predictor.predict_proba(pred_data_reg)
+                    
+                    if model_type == "l3":
+                        proba = predictor.predict_proba(pred_data_reg)
+                    elif model_type == "l2":
+                        proba = predictor.predict_proba(pred_data_reg, model="WeightedEnsemble_L2")
+                    else:
+                        proba = predictor.predict_proba(pred_data_reg)
+                        
                     score_col = 1 if 1 in proba.columns else proba.columns[0]
                     batch_scores[mask] = proba[score_col].values
             
-            # Post-process using Anisotropic Spatial Probability Blending
+            # Post-process with Anisotropic Spatial Probability Blending
             for info in batch_info:
                 probs = batch_scores[info['start'] : info['end']]
                 cands = info['cands']
@@ -406,11 +471,23 @@ def run_step36_inference():
                 dx_normal_sq = np.maximum(dx_sq - dx_tangential ** 2, 0.0)
                 
                 weights = np.exp(- (dx_tangential ** 2) / (2.0 * (sigma_tangential ** 2)) 
-                                 - dx_normal_sq / (2.0 * (sigma_normal ** 2)))
+                                  - dx_normal_sq / (2.0 * (sigma_normal ** 2)))
                 
                 smoothed_probs = weights.dot(active_probs)
                 best_idx = np.argmax(smoothed_probs)
                 final_coords = cands[best_idx]
+                
+                if blend_priors:
+                    optimal_weights = {
+                        "fast_straight_low": (0.60, 0.35, 0.05),
+                        "slow_moderate_turning": (1.00, 0.00, 0.00),
+                        "fast_moderate_turning": (0.65, 0.35, 0.00),
+                        "fast_straight_high": (0.85, 0.10, 0.05),
+                        "fast_extreme_turning": (0.75, 0.25, 0.00),
+                        "slow_extreme_turning": (0.80, 0.00, 0.20)
+                    }
+                    w_m, w_4, w_7 = optimal_weights[info['regime']]
+                    final_coords = w_m * final_coords + w_4 * info['s4_pos'] + w_7 * info['s7_pos']
                 
                 predictions.append({
                     "id": info['id'],
@@ -422,34 +499,43 @@ def run_step36_inference():
                 disp = np.linalg.norm(final_coords - info['p0'])
                 displacements.append(disp)
                 
-            if (i // batch_size + 1) % 10 == 0:
-                print(f"Processed batch {i//batch_size + 1}/{(len(test_ids)-1)//batch_size + 1}...")
+            print(f"Processed batch {i//batch_size + 1}/{(len(test_ids)-1)//batch_size + 1}...")
                 
         out_df = pd.DataFrame(predictions)
-        out_path = Path("outputs/step36_three_regime/submission.csv")
+        suffix = "_blended" if blend_priors else ""
+        out_path = Path(f"outputs/step39_six_regime/submission{suffix}.csv")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_df.to_csv(out_path, index=False)
-        print(f"Step 36 submission saved to {out_path}")
+        print(f"Step 39 submission saved to {out_path}")
         
         displacements = np.array(displacements)
         mean_disp_cm = displacements.mean() * 100
         max_disp_cm = displacements.max() * 100
         
         success_msg = (
-            f"✅ [Step 36] GMM 3-Regime Specialized Inference Finished!\n"
+            f"✅ [Step 39] GMM 6-Regime Specialized Inference Finished!\n"
             f"Saved to: `{out_path}`\n"
             f"Physical Displacement from Last Observed Point (p0):\n"
             f"- **Mean**: **{mean_disp_cm:.4f} cm**\n"
             f"- **Max**: **{max_disp_cm:.4f} cm**"
         )
-        send_discord_notification(None, success_msg)
+        send_discord_notification(URL, success_msg)
         print(success_msg)
         
     except BaseException as e:
-        error_msg = f"❌ [Step 36] Inference ERROR:\n{str(e)}\n\n{traceback.format_exc()}"
-        send_discord_notification(None, error_msg)
+        error_msg = f"❌ [Step 39] Inference ERROR:\n{str(e)}\n\n{traceback.format_exc()}"
+        send_discord_notification(URL, error_msg)
         print(error_msg)
         raise e
 
 if __name__ == "__main__":
-    run_step36_inference()
+    import argparse
+    parser = argparse.ArgumentParser(description="Step 39 GMM 6-Regime Inference")
+    parser.add_argument("--batch_size", type=int, default=250, help="Batch size of test cases to process (default: 250)")
+    parser.add_argument("--model_type", type=str, default="l3", choices=["l3", "l2"],
+                        help="Model prediction type: 'l3' (WeightedEnsemble_L3), 'l2' (WeightedEnsemble_L2)")
+    parser.add_argument("--blend_priors", action="store_true",
+                        help="Apply optimal regime-specific coordinate blending with S4 and S7 priors")
+    args = parser.parse_args()
+    
+    run_step39_inference(batch_size=args.batch_size, model_type=args.model_type, blend_priors=args.blend_priors)
